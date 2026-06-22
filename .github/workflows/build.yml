@@ -3,7 +3,7 @@ name: Build Tauri App
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
 
@@ -35,7 +35,10 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      - name: Build
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri
         run: npm run tauri build -- --bundles deb
 
       - name: Upload Linux .deb
@@ -65,7 +68,10 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      - name: Build
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri
         run: npm run tauri build -- --bundles msi
 
       - name: Upload Windows .msi

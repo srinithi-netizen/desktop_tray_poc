@@ -1,33 +1,23 @@
 <template>
   <div class="card">
-    <button class="select-btn" @click="handleSelectFile">
-      Select File
+    <button class="select-btn" @click="handleSelectFile" :disabled="isQueuing">
+      {{ isQueuing ? 'Adding to queue…' : 'Select File' }}
     </button>
 
-    <p class="filename-display">
-      {{ selectedFileName || 'No file selected yet' }}
-    </p>
-
-    <!-- Upload button only appears once a file has been selected. -->
-    <button
-      v-if="selectedFileName"
-      class="upload-btn"
-      @click="handleUpload"
-    >
-      Upload
-    </button>
+    <p v-if="message" class="message" :class="messageType">{{ message }}</p>
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 
-// defineEmits declares the custom events this component can fire upward.
-// App.vue listens for 'upload-saved'.
-const emit = defineEmits(['upload-saved'])
+const emit = defineEmits(['upload-queued'])
 
-const selectedFileName = ref('')
+const isQueuing = ref(false)
+const message   = ref('')
+const messageType = ref('')
 
 async function handleSelectFile() {
   const filePath = await open({
@@ -35,74 +25,58 @@ async function handleSelectFile() {
     directory: false,
   })
 
-  if (filePath) {
-    selectedFileName.value = filePath.split(/[\\/]/).pop()
+  if (!filePath) return
+
+  isQueuing.value = true
+  message.value = ''
+
+  try {
+    // Call Rust: copy file to secure folder + save to SQLite
+    const record = await invoke('queue_file', {
+      filePath,
+      isOnline: navigator.onLine,
+    })
+
+    // Tell App.vue about the new queued file
+    emit('upload-queued', record)
+
+    message.value = navigator.onLine
+      ? '✅ File queued — uploading now'
+      : '📦 Saved locally — will upload when online'
+    messageType.value = navigator.onLine ? 'success' : 'warning'
+
+  } catch (err) {
+    message.value = `❌ Error: ${err}`
+    messageType.value = 'error'
+  } finally {
+    isQueuing.value = false
+    setTimeout(() => message.value = '', 4000)
   }
-}
-
-function handleUpload() {
-  // Build the upload record. This is the object that gets stored
-  // in localStorage and displayed in the history list.
-  const newUpload = {
-    id: Date.now(),                          // unique ID — milliseconds since epoch
-    fileName: selectedFileName.value,
-    status: 'Uploaded',
-    uploadedAt: new Date().toLocaleString(), // human-readable timestamp
-  }
-
-  // Read the current array out of localStorage.
-  // If nothing is there yet, default to an empty array.
-  const existing = JSON.parse(localStorage.getItem('uploads') || '[]')
-
-  // Add the new record to the front so newest appears first in the list.
-  existing.unshift(newUpload)
-
-  // Write the updated array back to localStorage as a JSON string.
-  localStorage.setItem('uploads', JSON.stringify(existing))
-
-  // Tell App.vue about the new record so it can update its reactive
-  // array without needing to re-read localStorage.
-  emit('upload-saved', newUpload)
-
-  // Clear the selected filename so the user starts fresh for the next file.
-  selectedFileName.value = ''
 }
 </script>
 
 <style scoped>
 .select-btn {
-  padding: 8px 16px;
+  width: 100%;
+  padding: 10px 16px;
   font-size: 14px;
   background-color: #2d6cdf;
   color: white;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
+  transition: background-color 0.15s;
 }
 
-.select-btn:hover {
-  background-color: #1f54b3;
-}
+.select-btn:hover:not(:disabled) { background-color: #1f54b3; }
+.select-btn:disabled { background-color: #a0b4e0; cursor: default; }
 
-.filename-display {
+.message {
   margin-top: 10px;
   font-size: 13px;
-  color: #666;
+  text-align: center;
 }
-
-.upload-btn {
-  margin-top: 12px;
-  padding: 8px 16px;
-  font-size: 14px;
-  background-color: #27ae60;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  display: block;
-}
-
-.upload-btn:hover {
-  background-color: #1e8449;
-}
+.success { color: #27ae60; }
+.warning { color: #e67e22; }
+.error   { color: #e74c3c; }
 </style>

@@ -258,8 +258,56 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
     };
 
     let client = reqwest::Client::new();
+    let chunk_size = 5 * 1024 * 1024_usize; // 5MB
+    let all_chunks: Vec<&[u8]> = file_bytes.chunks(chunk_size).collect();
+    let total_chunks = all_chunks.len();
 
-    // ── Step 1: Init multipart upload ────────────────────────────────
+    // ── Single chunk → use /documents/upload (simpler, more reliable) ──
+    if total_chunks == 1 {
+        let form = multipart::Form::new()
+            .part(
+                "file",
+                multipart::Part::bytes(file_bytes.clone())
+                    .file_name(record.file_name.clone())
+                    .mime_str("application/octet-stream")
+                    .unwrap(),
+            );
+
+        let result = client
+            .post(format!("{}/documents/upload", SERVER_URL))
+            .multipart(form)
+            .send()
+            .await;
+
+        match result {
+            Ok(r) if r.status().is_success() => {
+                let uploaded_at = chrono::Local::now().to_rfc3339();
+                if let Ok(conn) = db::get_conn(app) {
+                    conn.execute(
+                        "UPDATE uploads SET status='completed', progress=100,
+                         done_chunks=1, uploaded_at=?1 WHERE id=?2",
+                        params![uploaded_at, record.id],
+                    ).ok();
+                    conn.execute(
+                        "UPDATE chunks SET status='done', sent_at=?1 WHERE upload_id=?2",
+                        params![uploaded_at, record.id],
+                    ).ok();
+                }
+            }
+            Ok(r) => {
+                let err = format!("Upload failed: {}", r.status());
+                update_upload_status(app, &record.id, "failed", 0, 0, Some(&err));
+            }
+            Err(e) => {
+                update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
+            }
+        }
+        return;
+    }
+
+    // ── Multiple chunks → use multipart init/part/complete ────────────
+
+    // Step 1: Init
     let init_res = client
         .post(format!("{}/documents/multipart/init", SERVER_URL))
         .json(&serde_json::json!({
@@ -291,11 +339,6 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
     let minio_upload_id = init_data.upload_id;
     let object_name     = init_data.object_name;
 
-    // ── Step 2: Upload each chunk as a multipart part ─────────────────
-    let chunk_size = 5 * 1024 * 1024_usize; // 5MB
-    let all_chunks: Vec<&[u8]> = file_bytes.chunks(chunk_size).collect();
-    let total_chunks = all_chunks.len();
-
     // Get already-done chunk indices for resume
     let done_indices: Vec<i64> = {
         let conn = match db::get_conn(app) {
@@ -313,7 +356,6 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
             .unwrap_or_default()
     };
 
-    // Load already-done ETags from DB to include in complete call
     let mut completed_parts: Vec<PartResponse> = {
         let conn = match db::get_conn(app) {
             Ok(c) => c,
@@ -327,7 +369,7 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
         };
         stmt.query_map(params![record.id], |row| {
             Ok(PartResponse {
-                part_number: row.get::<_, i64>(0)? + 1, // MinIO part numbers are 1-based
+                part_number: row.get::<_, i64>(0)? + 1,
                 etag: row.get::<_, String>(1).unwrap_or_default(),
             })
         })
@@ -337,9 +379,10 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
 
     let mut done_count = done_indices.len() as i64;
 
+    // Step 2: Upload parts
     for (i, chunk_data) in all_chunks.iter().enumerate() {
-        let chunk_index  = i as i64;
-        let part_number  = i as i64 + 1; // MinIO parts are 1-based
+        let chunk_index = i as i64;
+        let part_number = i as i64 + 1;
 
         if done_indices.contains(&chunk_index) {
             continue;
@@ -352,11 +395,11 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
             ).ok();
         }
 
-        // Build multipart form: fields first, then file
+        // Fields MUST come before file in the form for busboy to read them in time
         let form = multipart::Form::new()
-            .text("uploadId",    minio_upload_id.clone())
-            .text("objectName",  object_name.clone())
-            .text("partNumber",  part_number.to_string())
+            .text("uploadId",   minio_upload_id.clone())
+            .text("objectName", object_name.clone())
+            .text("partNumber", part_number.to_string())
             .part(
                 "file",
                 multipart::Part::bytes(chunk_data.to_vec())
@@ -385,7 +428,6 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
                 let sent_at = chrono::Local::now().to_rfc3339();
                 done_count += 1;
 
-                // Save ETag to DB for resume support
                 if let Ok(conn) = db::get_conn(app) {
                     conn.execute(
                         "UPDATE chunks SET status='done', sent_at=?1, error_msg=NULL, etag=?2
@@ -413,7 +455,7 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
         }
     }
 
-    // ── Step 3: Complete multipart upload ─────────────────────────────
+    // Step 3: Complete
     completed_parts.sort_by_key(|p| p.part_number);
 
     let complete_res = client
@@ -447,7 +489,6 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
         }
     }
 }
-
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn mark_chunk_failed(app: &AppHandle, upload_id: &str, chunk_index: i64, error: &str) {

@@ -3,6 +3,7 @@
 mod db;
 mod upload;
 
+use std::process::Command;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -22,6 +23,22 @@ fn main() {
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init database");
+
+            // ─── Start bundled Node server ───────────────────────────
+            let resource_path = app.path()
+                .resource_dir()
+                .unwrap()
+                .join("server.exe");
+
+            if resource_path.exists() {
+                Command::new(&resource_path)
+                    .spawn()
+                    .expect("Failed to start server.exe");
+                println!("✅ server.exe started from {:?}", resource_path);
+            } else {
+                eprintln!("⚠️  server.exe not found at {:?}", resource_path);
+            }
+            // ────────────────────────────────────────────────────────
 
             let handle = app.handle();
 

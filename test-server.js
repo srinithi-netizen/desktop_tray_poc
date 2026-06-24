@@ -1,8 +1,8 @@
-import http from 'http'
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
 
+const http = require('http')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
 const UPLOAD_DIR = path.join(os.homedir(), 'FluxBooks-Server-Uploads')
 const CHUNKS_DIR = path.join(UPLOAD_DIR, 'chunks')
 const FILES_DIR  = path.join(UPLOAD_DIR, 'files')

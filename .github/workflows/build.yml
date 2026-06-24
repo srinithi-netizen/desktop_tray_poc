@@ -68,8 +68,12 @@ jobs:
       - name: Install pkg
         run: npm install -g @yao-pkg/pkg
 
+      - name: Create resources folder
+        run: mkdir -p src-tauri/resources
+        shell: bash
+
       - name: Bundle Node server
-        run: pkg server.js --targets node20-win-x64 --output src-tauri/resources/server.exe
+        run: pkg test-server.js --targets node20-win-x64 --output src-tauri/resources/server.exe
 
       - name: Install npm dependencies
         run: npm install
@@ -78,7 +82,7 @@ jobs:
         run: npm run build
 
       - name: Build Tauri
-        run: npm run tauri build -- --bundles msi,nsis
+        run: npm run tauri build -- --bundles msi,nsis --config "{\"bundle\":{\"resources\":{\"resources/server.exe\":\"server.exe\"}}}"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

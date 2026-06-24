@@ -10,6 +10,11 @@ use tauri::{
     Manager, RunEvent,
 };
 
+#[tauri::command]
+fn get_device_id(app: tauri::AppHandle) -> String {
+    db::get_device_id(&app)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -20,11 +25,11 @@ fn main() {
             upload::get_chunks,
             upload::retry_pending,
             upload::delete_upload,
+            get_device_id,
         ])
         .setup(|app| {
             db::init_db(app.handle()).expect("Failed to init database");
 
-            // ─── Start bundled Node server ───────────────────────────
             let resource_path = app.path()
                 .resource_dir()
                 .unwrap()
@@ -38,7 +43,6 @@ fn main() {
             } else {
                 eprintln!("⚠️  server.exe not found at {:?}", resource_path);
             }
-            // ────────────────────────────────────────────────────────
 
             let handle = app.handle();
 

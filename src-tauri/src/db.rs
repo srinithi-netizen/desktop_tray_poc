@@ -1,11 +1,10 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
+use uuid::Uuid;
 use std::fs;
 use tauri::{AppHandle, Manager};
 
 pub fn app_data_dir(app: &AppHandle) -> std::path::PathBuf {
-    app.path()
-        .app_data_dir()
-        .expect("No app data dir")
+    app.path().app_data_dir().expect("No app data dir")
 }
 
 pub fn uploads_dir(app: &AppHandle) -> std::path::PathBuf {
@@ -17,7 +16,6 @@ pub fn uploads_dir(app: &AppHandle) -> std::path::PathBuf {
 pub fn get_conn(app: &AppHandle) -> rusqlite::Result<Connection> {
     let db_path = app_data_dir(app).join("fluxbooks.db");
     let conn = Connection::open(db_path)?;
-    // Set on EVERY connection, not just init
     conn.execute_batch("
         PRAGMA journal_mode=WAL;
         PRAGMA busy_timeout=5000;
@@ -26,12 +24,42 @@ pub fn get_conn(app: &AppHandle) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+pub fn get_device_id(app: &AppHandle) -> String {
+    let conn = match get_conn(app) {
+        Ok(c) => c,
+        Err(_) => return Uuid::new_v4().to_string(),
+    };
+
+    let existing: rusqlite::Result<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'device_id'",
+        [],
+        |row| row.get(0),
+    );
+
+    match existing {
+        Ok(id) => id,
+        Err(_) => {
+            let new_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('device_id', ?1)",
+                rusqlite::params![new_id],
+            ).ok();
+            new_id
+        }
+    }
+}
+
 pub fn init_db(app: &AppHandle) -> rusqlite::Result<()> {
     let data_dir = app_data_dir(app);
     fs::create_dir_all(&data_dir).ok();
 
-    let conn = get_conn(app)?;  // already sets WAL
+    let conn = get_conn(app)?;
     conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS uploads (
             id           TEXT PRIMARY KEY,
             file_name    TEXT NOT NULL,

@@ -6,9 +6,7 @@ use std::fs;
 use tauri::AppHandle;
 use uuid::Uuid;
 
-// ── Change this to your NestJS server URL ─────────────────────────────
 const SERVER_URL: &str = "http://192.168.1.81:3002";
-// ─────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UploadRecord {
@@ -37,7 +35,6 @@ pub struct ChunkRecord {
     pub error_msg:   Option<String>,
 }
 
-// NestJS multipart/init response
 #[derive(Deserialize, Debug)]
 struct InitResponse {
     #[serde(rename = "uploadId")]
@@ -46,7 +43,6 @@ struct InitResponse {
     object_name: String,
 }
 
-// NestJS multipart/part response
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct PartResponse {
     #[serde(rename = "PartNumber")]
@@ -66,7 +62,6 @@ pub async fn queue_file(
     eprintln!("[queue_file] called with path='{}' is_online={}", file_path, is_online);
 
     let src = std::path::Path::new(&file_path);
-
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())
@@ -88,18 +83,12 @@ pub async fn queue_file(
         .map_err(|e| format!("Failed to copy file: {}", e))?;
     let local_path_str = local_path.to_string_lossy().to_string();
 
-    eprintln!("[queue_file] copied to local_path='{}'", local_path_str);
-
-    let chunk_size = 5 * 1024 * 1024_i64; // 5MB — MinIO multipart minimum
+    let chunk_size = 5 * 1024 * 1024_i64;
     let total_chunks = ((file_size as f64) / (chunk_size as f64)).ceil() as i64;
     let total_chunks = total_chunks.max(1);
-
-    eprintln!("[queue_file] total_chunks={} (chunk_size=5MB)", total_chunks);
-
     let queued_at = chrono::Local::now().to_rfc3339();
 
     let conn = db::get_conn(&app).map_err(|e| e.to_string())?;
-
     conn.execute(
         "INSERT INTO uploads
             (id, file_name, local_path, file_size, status, progress,
@@ -108,13 +97,10 @@ pub async fn queue_file(
         params![id, file_name, local_path_str, file_size, total_chunks, queued_at],
     ).map_err(|e| e.to_string())?;
 
-    eprintln!("[queue_file] inserted upload row id='{}'", id);
-
     for i in 0..total_chunks {
         let start = i * chunk_size;
         let end = ((i + 1) * chunk_size).min(file_size);
         let size = end - start;
-
         conn.execute(
             "INSERT OR IGNORE INTO chunks
                 (upload_id, chunk_index, total, status, size_bytes)
@@ -122,8 +108,6 @@ pub async fn queue_file(
             params![id, i, total_chunks, size],
         ).map_err(|e| e.to_string())?;
     }
-
-    eprintln!("[queue_file] inserted {} chunk rows", total_chunks);
 
     let record = UploadRecord {
         id: id.clone(),
@@ -140,14 +124,11 @@ pub async fn queue_file(
     };
 
     if is_online {
-        eprintln!("[queue_file] is_online=true → spawning attempt_upload for id='{}'", id);
         let app_clone = app.clone();
         let record_clone = record.clone();
         tauri::async_runtime::spawn(async move {
             attempt_upload(&app_clone, &record_clone).await;
         });
-    } else {
-        eprintln!("[queue_file] is_online=false → skipping upload, queued only");
     }
 
     Ok(record)
@@ -157,7 +138,6 @@ pub async fn queue_file(
 
 #[tauri::command]
 pub fn get_queue(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
-    eprintln!("[get_queue] fetching all uploads");
     let conn = db::get_conn(&app).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT id, file_name, local_path, file_size, status, progress,
@@ -183,7 +163,6 @@ pub fn get_queue(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
     .filter_map(|r| r.ok())
     .collect();
 
-    eprintln!("[get_queue] returned {} records", records.len());
     Ok(records)
 }
 
@@ -191,7 +170,6 @@ pub fn get_queue(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
 
 #[tauri::command]
 pub fn get_chunks(app: AppHandle, upload_id: String) -> Result<Vec<ChunkRecord>, String> {
-    eprintln!("[get_chunks] upload_id='{}'", upload_id);
     let conn = db::get_conn(&app).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT id, upload_id, chunk_index, total, status, size_bytes, sent_at, error_msg
@@ -213,7 +191,6 @@ pub fn get_chunks(app: AppHandle, upload_id: String) -> Result<Vec<ChunkRecord>,
     .filter_map(|r| r.ok())
     .collect();
 
-    eprintln!("[get_chunks] returned {} chunks for upload_id='{}'", records.len(), upload_id);
     Ok(records)
 }
 
@@ -221,17 +198,13 @@ pub fn get_chunks(app: AppHandle, upload_id: String) -> Result<Vec<ChunkRecord>,
 
 #[tauri::command]
 pub async fn retry_pending(app: AppHandle) -> Result<(), String> {
-    eprintln!("[retry_pending] called");
     let records = get_queue(app.clone())?;
     let pending: Vec<UploadRecord> = records
         .into_iter()
         .filter(|r| r.status == "pending" || r.status == "failed")
         .collect();
 
-    eprintln!("[retry_pending] found {} pending/failed uploads", pending.len());
-
     for record in pending {
-        eprintln!("[retry_pending] spawning attempt_upload for id='{}'", record.id);
         let app_clone = app.clone();
         let record_clone = record.clone();
         tauri::async_runtime::spawn(async move {
@@ -241,13 +214,11 @@ pub async fn retry_pending(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-// ── Delete upload + its chunks + local file ───────────────────────────
+// ── Delete upload ─────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn delete_upload(app: AppHandle, id: String) -> Result<(), String> {
-    eprintln!("[delete_upload] id='{}'", id);
     let conn = db::get_conn(&app).map_err(|e| e.to_string())?;
-
     let local_path: Option<String> = conn.query_row(
         "SELECT local_path FROM uploads WHERE id = ?1",
         params![id],
@@ -258,7 +229,6 @@ pub fn delete_upload(app: AppHandle, id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if let Some(path) = local_path {
-        eprintln!("[delete_upload] removing local file '{}'", path);
         fs::remove_file(path).ok();
     }
     Ok(())
@@ -267,10 +237,7 @@ pub fn delete_upload(app: AppHandle, id: String) -> Result<(), String> {
 // ── Internal: upload via NestJS multipart API → MinIO ────────────────
 
 async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
-    eprintln!(
-        "[attempt_upload] START id='{}' file='{}' size={} chunks={}",
-        record.id, record.file_name, record.file_size, record.total_chunks
-    );
+    eprintln!("[attempt_upload] START id='{}'", record.id);
 
     if let Ok(conn) = db::get_conn(app) {
         conn.execute(
@@ -280,31 +247,23 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
     }
 
     let file_bytes = match fs::read(&record.local_path) {
-        Ok(b) => {
-            eprintln!("[attempt_upload] read {} bytes from '{}'", b.len(), record.local_path);
-            b
-        }
+        Ok(b) => b,
         Err(e) => {
-            eprintln!("[attempt_upload] ERROR reading file: {}", e);
             update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
             return;
         }
     };
 
     let client = reqwest::Client::new();
-    let chunk_size = 5 * 1024 * 1024_usize; // 5MB
+    let chunk_size = 5 * 1024 * 1024_usize;
     let all_chunks: Vec<&[u8]> = file_bytes.chunks(chunk_size).collect();
     let total_chunks = all_chunks.len();
 
-    eprintln!("[attempt_upload] split into {} actual chunks", total_chunks);
-
-    // ── Single chunk → use /documents/upload ──────────────────────────
+    // ── Single chunk ──────────────────────────────────────────────────
     if total_chunks == 1 {
         let url = format!("{}/documents/upload", SERVER_URL);
-        eprintln!("[attempt_upload] single-chunk path → POST {}", url);
 
-        let file_vec = file_bytes.clone();
-        let file_part = multipart::Part::bytes(file_vec)
+        let file_part = multipart::Part::bytes(file_bytes.clone())
             .file_name(record.file_name.clone())
             .mime_str("application/octet-stream")
             .unwrap();
@@ -312,129 +271,82 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
         let form = multipart::Form::new()
             .part("file", file_part);
 
-        eprintln!("[attempt_upload] sending request...");
-        let result = client
-            .post(&url)
-            .multipart(form)
-            .send()
-            .await;
-
-        match result {
-            Ok(r) => {
-                let status = r.status();
-                eprintln!("[attempt_upload] /documents/upload response status={}", status);
-                if status.is_success() {
-                    let uploaded_at = chrono::Local::now().to_rfc3339();
-                    eprintln!("[attempt_upload] COMPLETED (single chunk) at {}", uploaded_at);
-                    if let Ok(conn) = db::get_conn(app) {
-                        conn.execute(
-                            "UPDATE uploads SET status='completed', progress=100,
-                             done_chunks=1, uploaded_at=?1 WHERE id=?2",
-                            params![uploaded_at, record.id],
-                        ).ok();
-                        conn.execute(
-                            "UPDATE chunks SET status='done', sent_at=?1 WHERE upload_id=?2",
-                            params![uploaded_at, record.id],
-                        ).ok();
-                    }
-                } else {
-                    let body = r.text().await.unwrap_or_default();
-                    let err = format!("Upload failed: status={} body={}", status, body);
-                    eprintln!("[attempt_upload] ERROR {}", err);
-                    update_upload_status(app, &record.id, "failed", 0, 0, Some(&err));
+        match client.post(&url).multipart(form).send().await {
+            Ok(r) if r.status().is_success() => {
+                let uploaded_at = chrono::Local::now().to_rfc3339();
+                if let Ok(conn) = db::get_conn(app) {
+                    conn.execute(
+                        "UPDATE uploads SET status='completed', progress=100,
+                         done_chunks=1, uploaded_at=?1 WHERE id=?2",
+                        params![uploaded_at, record.id],
+                    ).ok();
+                    conn.execute(
+                        "UPDATE chunks SET status='done', sent_at=?1 WHERE upload_id=?2",
+                        params![uploaded_at, record.id],
+                    ).ok();
                 }
             }
+            Ok(r) => {
+                let err = format!("Upload failed: status={}", r.status());
+                update_upload_status(app, &record.id, "failed", 0, 0, Some(&err));
+            }
             Err(e) => {
-                eprintln!("[attempt_upload] REQUEST ERROR (single chunk): {}", e);
                 update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
             }
         }
         return;
     }
 
-    // ── Multiple chunks → multipart init/part/complete ────────────────
-
-    // Step 1: Init
+    // ── Multiple chunks: Step 1 — Init (clientId sent HERE only) ─────
+    let client_id = db::get_device_id(app);
     let init_url = format!("{}/documents/multipart/init", SERVER_URL);
-    eprintln!("[attempt_upload] multi-chunk: POST {}", init_url);
 
     let init_body = serde_json::json!({
-        "filename": record.file_name,
-        "contentType": "application/octet-stream"
+        "filename":    record.file_name,
+        "contentType": "application/octet-stream",
+        "clientId":    client_id
     });
-    eprintln!("[attempt_upload] init body: {}", init_body);
 
-    let init_res = client
-        .post(&init_url)
-        .json(&init_body)
-        .send()
-        .await;
-
-    let init_data: InitResponse = match init_res {
-        Ok(r) => {
-            let status = r.status();
-            eprintln!("[attempt_upload] /multipart/init response status={}", status);
-            if status.is_success() {
-                match r.json::<InitResponse>().await {
-                    Ok(d) => {
-                        eprintln!("[attempt_upload] init parsed: upload_id='{}' object_name='{}'",
-                            d.upload_id, d.object_name);
-                        d
-                    }
-                    Err(e) => {
-                        eprintln!("[attempt_upload] ERROR parsing init response: {}", e);
-                        update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
-                        return;
-                    }
+    let init_data: InitResponse = match client.post(&init_url).json(&init_body).send().await {
+        Ok(r) if r.status().is_success() => {
+            match r.json::<InitResponse>().await {
+                Ok(d) => d,
+                Err(e) => {
+                    update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
+                    return;
                 }
-            } else {
-                let body = r.text().await.unwrap_or_default();
-                let err = format!("Init failed: status={} body={}", status, body);
-                eprintln!("[attempt_upload] ERROR {}", err);
-                update_upload_status(app, &record.id, "failed", 0, 0, Some(&err));
-                return;
             }
         }
+        Ok(r) => {
+            let err = format!("Init failed: status={} body={}", r.status(), r.text().await.unwrap_or_default());
+            update_upload_status(app, &record.id, "failed", 0, 0, Some(&err));
+            return;
+        }
         Err(e) => {
-            eprintln!("[attempt_upload] REQUEST ERROR (init): {}", e);
             update_upload_status(app, &record.id, "failed", 0, 0, Some(&e.to_string()));
             return;
         }
     };
 
     let minio_upload_id = init_data.upload_id;
-    let object_name     = init_data.object_name;
+    let object_name = init_data.object_name;
 
-    // Get already-done chunk indices for resume
+    // ── Step 2: Upload parts (no clientId) ───────────────────────────
     let done_indices: Vec<i64> = {
-        let conn = match db::get_conn(app) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let conn = match db::get_conn(app) { Ok(c) => c, Err(_) => return };
         let mut stmt = match conn.prepare(
             "SELECT chunk_index FROM chunks WHERE upload_id=?1 AND status='done'"
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        ) { Ok(s) => s, Err(_) => return };
         stmt.query_map(params![record.id], |row| row.get(0))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
     };
 
-    eprintln!("[attempt_upload] resuming: {} chunks already done: {:?}", done_indices.len(), done_indices);
-
     let mut completed_parts: Vec<PartResponse> = {
-        let conn = match db::get_conn(app) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let conn = match db::get_conn(app) { Ok(c) => c, Err(_) => return };
         let mut stmt = match conn.prepare(
             "SELECT chunk_index, etag FROM chunks WHERE upload_id=?1 AND status='done'"
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        ) { Ok(s) => s, Err(_) => return };
         stmt.query_map(params![record.id], |row| {
             Ok(PartResponse {
                 part_number: row.get::<_, i64>(0)? + 1,
@@ -446,26 +358,16 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
     };
 
     let mut done_count = done_indices.len() as i64;
-
-    // Step 2: Upload parts
     let part_url = format!("{}/documents/multipart/part", SERVER_URL);
 
     for (i, chunk_data) in all_chunks.iter().enumerate() {
         let chunk_index = i as i64;
         let part_number = i as i64 + 1;
 
-        if done_indices.contains(&chunk_index) {
-            eprintln!("[attempt_upload] chunk {} already done, skipping", chunk_index);
-            continue;
-        }
+        if done_indices.contains(&chunk_index) { continue; }
 
         let chunk_vec = chunk_data.to_vec();
         let chunk_len = chunk_vec.len() as u64;
-
-        eprintln!(
-            "[attempt_upload] uploading chunk {}/{} ({} bytes) → POST {}",
-            part_number, total_chunks, chunk_len, part_url
-        );
 
         if let Ok(conn) = db::get_conn(app) {
             conn.execute(
@@ -485,69 +387,48 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
             .text("partNumber",    part_number.to_string())
             .text("contentLength", chunk_len.to_string())
             .part("file",          file_part);
+        // ↑ no clientId here
 
-        let result = client
-            .post(&part_url)
-            .multipart(form)
-            .send()
-            .await;
-
-        match result {
-            Ok(resp) => {
-                let status = resp.status();
-                eprintln!("[attempt_upload] chunk {} response status={}", chunk_index, status);
-                if status.is_success() {
-                    let part: PartResponse = match resp.json::<PartResponse>().await {
-                        Ok(p) => {
-                            eprintln!("[attempt_upload] chunk {} done: PartNumber={} ETag='{}'",
-                                chunk_index, p.part_number, p.etag);
-                            p
+        match client.post(&part_url).multipart(form).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<PartResponse>().await {
+                    Ok(part) => {
+                        let sent_at = chrono::Local::now().to_rfc3339();
+                        done_count += 1;
+                        if let Ok(conn) = db::get_conn(app) {
+                            conn.execute(
+                                "UPDATE chunks SET status='done', sent_at=?1, error_msg=NULL, etag=?2
+                                 WHERE upload_id=?3 AND chunk_index=?4",
+                                params![sent_at, part.etag.clone(), record.id, chunk_index],
+                            ).ok();
                         }
-                        Err(e) => {
-                            eprintln!("[attempt_upload] ERROR parsing part response for chunk {}: {}", chunk_index, e);
-                            mark_chunk_failed(app, &record.id, chunk_index, &e.to_string());
-                            update_upload_status(app, &record.id, "failed", 0, done_count, Some(&e.to_string()));
-                            return;
-                        }
-                    };
-
-                    let sent_at = chrono::Local::now().to_rfc3339();
-                    done_count += 1;
-
-                    if let Ok(conn) = db::get_conn(app) {
-                        conn.execute(
-                            "UPDATE chunks SET status='done', sent_at=?1, error_msg=NULL, etag=?2
-                             WHERE upload_id=?3 AND chunk_index=?4",
-                            params![sent_at, part.etag.clone(), record.id, chunk_index],
-                        ).ok();
+                        completed_parts.push(part);
+                        let progress = (done_count * 100 / total_chunks as i64) as i64;
+                        update_upload_status(app, &record.id, "uploading", progress, done_count, None);
                     }
-
-                    completed_parts.push(part);
-                    let progress = (done_count * 100 / total_chunks as i64) as i64;
-                    eprintln!("[attempt_upload] progress={}% ({}/{} chunks)", progress, done_count, total_chunks);
-                    update_upload_status(app, &record.id, "uploading", progress, done_count, None);
-                } else {
-                    let body = resp.text().await.unwrap_or_default();
-                    let err = format!("Part upload failed: status={} body={}", status, body);
-                    eprintln!("[attempt_upload] ERROR chunk {}: {}", chunk_index, err);
-                    mark_chunk_failed(app, &record.id, chunk_index, &err);
-                    update_upload_status(app, &record.id, "failed", 0, done_count, Some(&err));
-                    return;
+                    Err(e) => {
+                        mark_chunk_failed(app, &record.id, chunk_index, &e.to_string());
+                        update_upload_status(app, &record.id, "failed", 0, done_count, Some(&e.to_string()));
+                        return;
+                    }
                 }
             }
-            Err(e) => {
-                eprintln!("[attempt_upload] REQUEST ERROR chunk {}: {}", chunk_index, e);
-                let err = e.to_string();
+            Ok(resp) => {
+                let err = format!("Part failed: status={}", resp.status());
                 mark_chunk_failed(app, &record.id, chunk_index, &err);
                 update_upload_status(app, &record.id, "failed", 0, done_count, Some(&err));
+                return;
+            }
+            Err(e) => {
+                mark_chunk_failed(app, &record.id, chunk_index, &e.to_string());
+                update_upload_status(app, &record.id, "failed", 0, done_count, Some(&e.to_string()));
                 return;
             }
         }
     }
 
-    // Step 3: Complete
+    // ── Step 3: Complete (no clientId) ───────────────────────────────
     completed_parts.sort_by_key(|p| p.part_number);
-
     let complete_url = format!("{}/documents/multipart/complete", SERVER_URL);
     let complete_body = serde_json::json!({
         "objectName":  object_name,
@@ -555,38 +436,23 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
         "parts":       completed_parts,
         "contentType": "application/octet-stream"
     });
-    eprintln!("[attempt_upload] completing multipart → POST {}", complete_url);
-    eprintln!("[attempt_upload] complete body: {}", complete_body);
 
-    let complete_res = client
-        .post(&complete_url)
-        .json(&complete_body)
-        .send()
-        .await;
-
-    match complete_res {
-        Ok(r) => {
-            let status = r.status();
-            eprintln!("[attempt_upload] /multipart/complete response status={}", status);
-            if status.is_success() {
-                let uploaded_at = chrono::Local::now().to_rfc3339();
-                eprintln!("[attempt_upload] COMPLETED (multipart) at {}", uploaded_at);
-                if let Ok(conn) = db::get_conn(app) {
-                    conn.execute(
-                        "UPDATE uploads SET status='completed', progress=100,
-                         done_chunks=?1, uploaded_at=?2 WHERE id=?3",
-                        params![total_chunks as i64, uploaded_at, record.id],
-                    ).ok();
-                }
-            } else {
-                let body = r.text().await.unwrap_or_default();
-                let err = format!("Complete failed: status={} body={}", status, body);
-                eprintln!("[attempt_upload] ERROR {}", err);
-                update_upload_status(app, &record.id, "failed", 0, done_count, Some(&err));
+    match client.post(&complete_url).json(&complete_body).send().await {
+        Ok(r) if r.status().is_success() => {
+            let uploaded_at = chrono::Local::now().to_rfc3339();
+            if let Ok(conn) = db::get_conn(app) {
+                conn.execute(
+                    "UPDATE uploads SET status='completed', progress=100,
+                     done_chunks=?1, uploaded_at=?2 WHERE id=?3",
+                    params![total_chunks as i64, uploaded_at, record.id],
+                ).ok();
             }
         }
+        Ok(r) => {
+            let err = format!("Complete failed: status={} body={}", r.status(), r.text().await.unwrap_or_default());
+            update_upload_status(app, &record.id, "failed", 0, done_count, Some(&err));
+        }
         Err(e) => {
-            eprintln!("[attempt_upload] REQUEST ERROR (complete): {}", e);
             update_upload_status(app, &record.id, "failed", 0, done_count, Some(&e.to_string()));
         }
     }
@@ -597,7 +463,6 @@ async fn attempt_upload(app: &AppHandle, record: &UploadRecord) {
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn mark_chunk_failed(app: &AppHandle, upload_id: &str, chunk_index: i64, error: &str) {
-    eprintln!("[mark_chunk_failed] upload_id='{}' chunk_index={} error='{}'", upload_id, chunk_index, error);
     if let Ok(conn) = db::get_conn(app) {
         conn.execute(
             "UPDATE chunks SET status='failed', error_msg=?1
@@ -607,22 +472,10 @@ fn mark_chunk_failed(app: &AppHandle, upload_id: &str, chunk_index: i64, error: 
     }
 }
 
-fn update_upload_status(
-    app: &AppHandle,
-    id: &str,
-    status: &str,
-    progress: i64,
-    done_chunks: i64,
-    error: Option<&str>,
-) {
-    eprintln!(
-        "[update_upload_status] id='{}' status='{}' progress={} done_chunks={} error={:?}",
-        id, status, progress, done_chunks, error
-    );
+fn update_upload_status(app: &AppHandle, id: &str, status: &str, progress: i64, done_chunks: i64, error: Option<&str>) {
     if let Ok(conn) = db::get_conn(app) {
         conn.execute(
-            "UPDATE uploads SET status=?1, progress=?2, done_chunks=?3, error_msg=?4
-             WHERE id=?5",
+            "UPDATE uploads SET status=?1, progress=?2, done_chunks=?3, error_msg=?4 WHERE id=?5",
             params![status, progress, done_chunks, error, id],
         ).ok();
     }

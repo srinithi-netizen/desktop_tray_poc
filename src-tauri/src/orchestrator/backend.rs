@@ -1,10 +1,9 @@
 use std::process::{Command, Child, Stdio};
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
+use tauri::{AppHandle, Manager};  // Manager trait needed for .path()
 use tokio::time::{sleep, Duration, Instant};
-use tauri::AppHandle;
 
-static BACKEND: Lazy<Mutex<Option<Child>>> = Lazy::new(|| Mutex::new(None));
+static BACKEND: Mutex<Option<Child>> = Mutex::new(None);
 
 fn port_in_use(port: u16) -> bool {
     std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_err()
@@ -38,12 +37,10 @@ fn spawn(app: &AppHandle) -> Result<(), String> {
 
     let child = Command::new(&server_path)
         .env("PORT", "3001")
-        // Point to the embedded postgres we started above
         .env("DATABASE_URL", "postgresql://fluxbooks:fluxbooks123@127.0.0.1:5432/fluxbooks")
         .env("PLAID_ENV", "sandbox")
-        .env("PLAID_CLIENT_ID", "6a3bbeeb89e19d000ef29c83")   // ← replace with real values
-        .env("PLAID_SECRET", "73cb90f20796c53e1f48280a22c723")          // ← replace with real values
-        // Pipe stderr so crashes are visible in Tauri logs
+        .env("PLAID_CLIENT_ID", "6a3bbeeb89e19d000ef29c83")   // replace with real value
+        .env("PLAID_SECRET", "73cb90f20796c53e1f48280a22c723")          // replace with real value
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -63,7 +60,6 @@ async fn check_health() -> bool {
 
 async fn wait_until_healthy(timeout_secs: u64) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-
     while Instant::now() < deadline {
         if check_health().await {
             println!("[backend] healthy");
@@ -71,7 +67,6 @@ async fn wait_until_healthy(timeout_secs: u64) -> Result<(), String> {
         }
         sleep(Duration::from_millis(500)).await;
     }
-
     Err("Backend did not become healthy in time".into())
 }
 

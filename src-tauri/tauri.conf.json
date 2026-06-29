@@ -18,9 +18,11 @@
         "visible": true
       }
     ],
+ 
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src http://localhost:3001; script-src 'self'"
     }
+  
   },
   "bundle": {
     "active": true,
@@ -31,7 +33,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+      
+"resources": [
+  "resources/server",
+  "resources/postgres-linux"
+]    
   }
   
 }

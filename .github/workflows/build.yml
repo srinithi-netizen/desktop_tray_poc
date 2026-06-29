@@ -5,89 +5,237 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# ─────────────────────────────────────────────
+# Shared env — bump PG version in one place
+# ─────────────────────────────────────────────
+env:
+  PG_VERSION: "16.3"
+
 jobs:
 
+# ══════════════════════════════════════════════
+#  LINUX  →  .deb
+# ══════════════════════════════════════════════
   build-linux:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      # ── System deps ──────────────────────────
+      - name: Install Linux system dependencies
         run: |
           sudo apt update
-          sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf \
-            libxdo-dev
+          sudo apt install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            patchelf libxdo-dev \
+            xz-utils wget
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # ── Toolchains ───────────────────────────
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Install npm dependencies
+      # ── Embedded PostgreSQL (Linux x64) ──────
+      # Downloads a pre-built portable PG binary — no install needed.
+      - name: Download embedded PostgreSQL (Linux)
+        run: |
+          mkdir -p src-tauri/resources/postgres-linux
+          wget -q \
+            "https://repo.enterprisedb.com/postgresql-portable/${{ env.PG_VERSION }}/postgresql-${{ env.PG_VERSION }}-1-linux-x64-binaries.tar.gz" \
+            -O /tmp/pg-linux.tar.gz
+          tar -xzf /tmp/pg-linux.tar.gz -C src-tauri/resources/postgres-linux --strip-components=1
+          # Keep only what we need — shrinks the package
+          find src-tauri/resources/postgres-linux -mindepth 1 -maxdepth 1 \
+            ! -name bin ! -name lib \
+            -exec rm -rf {} +
+          # Only keep the binaries we actually call
+          find src-tauri/resources/postgres-linux/bin -type f \
+            ! -name postgres ! -name initdb ! -name pg_ctl ! -name pg_isready ! -name createdb \
+            -delete
+          echo "Postgres binaries:"
+          ls src-tauri/resources/postgres-linux/bin/
+
+      # ── NestJS → server binary ────────────────
+      - name: Install root npm deps
         run: npm install
 
       - name: Build frontend
         run: npm run build
 
-      - name: Build Tauri
+      - name: Build NestJS server
+        run: |
+          cd plaid-server
+          npm install
+          npm run build
+
+      - name: Bundle NestJS into server binary (Linux)
+        run: |
+          npm install -g @yao-pkg/pkg
+          cd plaid-server
+          pkg dist/main.js \
+            --targets node20-linux-x64 \
+            --output ../src-tauri/resources/server
+          chmod +x ../src-tauri/resources/server
+          echo "Server binary: $(ls -lh ../src-tauri/resources/server)"
+
+      # ── Tauri build ───────────────────────────
+      - name: Build Tauri (.deb)
         run: npm run tauri build -- --bundles deb
 
-      - name: Upload Linux .deb
+      - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: linux-deb
           path: src-tauri/target/release/bundle/deb/*.deb
 
+
+# ══════════════════════════════════════════════
+#  WINDOWS  →  .msi + .exe installer
+# ══════════════════════════════════════════════
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Install pkg
-        run: npm install -g @yao-pkg/pkg
+      # ── Embedded PostgreSQL (Windows x64) ────
+      - name: Download embedded PostgreSQL (Windows)
+        shell: pwsh
+        run: |
+          $pgUrl = "https://repo.enterprisedb.com/postgresql-portable/${{ env.PG_VERSION }}/postgresql-${{ env.PG_VERSION }}-1-windows-x64-binaries.zip"
+          $dest  = "src-tauri/resources/postgres-windows"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Invoke-WebRequest -Uri $pgUrl -OutFile "$env:TEMP\pg-win.zip"
+          Expand-Archive -Path "$env:TEMP\pg-win.zip" -DestinationPath $dest -Force
+          # Move contents up one level (zip has a pgsql/ root folder)
+          $inner = Join-Path $dest "pgsql"
+          if (Test-Path $inner) {
+            Get-ChildItem $inner | Move-Item -Destination $dest -Force
+            Remove-Item $inner -Recurse -Force
+          }
+          # Trim to bin + lib only
+          Get-ChildItem $dest |
+            Where-Object { $_.Name -notin @("bin","lib") } |
+            Remove-Item -Recurse -Force
+          Write-Host "Postgres binaries:"
+          Get-ChildItem "$dest/bin" | Select-Object Name
 
-      - name: Create resources folder
-        run: mkdir -p src-tauri/resources
-        shell: bash
-
-      - name: Bundle Node server
-        run: pkg test-server.js --targets node20-win-x64 --output src-tauri/resources/server.exe
-
-      - name: Install npm dependencies
+      # ── NestJS → server.exe ───────────────────
+      - name: Install root npm deps
         run: npm install
 
       - name: Build frontend
         run: npm run build
 
-      - name: Build Tauri
-        run: npm run tauri build -- --bundles msi,nsis --config src-tauri/windows-resources.json
+      - name: Build NestJS server
+        run: |
+          cd plaid-server
+          npm install
+          npm run build
 
-      - name: Upload Windows artifacts
+      - name: Bundle NestJS into server.exe (Windows)
+        shell: bash
+        run: |
+          npm install -g @yao-pkg/pkg
+          cd plaid-server
+          pkg dist/main.js \
+            --targets node20-win-x64 \
+            --output ../src-tauri/resources/server.exe
+          echo "Server binary: $(ls -lh ../src-tauri/resources/server.exe)"
+
+      # ── Tauri build ───────────────────────────
+      - name: Build Tauri (.msi + .exe)
+        run: npm run tauri build -- --bundles msi,nsis
+
+      - name: Upload Windows installers
         uses: actions/upload-artifact@v4
         with:
           name: windows-installers
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
+
+
+# ══════════════════════════════════════════════
+#  macOS  →  .dmg
+# ══════════════════════════════════════════════
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # ── Embedded PostgreSQL (macOS) ───────────
+      # Use Homebrew's postgres — portable enough for bundling
+      - name: Install PostgreSQL via Homebrew
+        run: |
+          brew install postgresql@16
+          PG_PREFIX=$(brew --prefix postgresql@16)
+          echo "PG_PREFIX=$PG_PREFIX" >> $GITHUB_ENV
+
+      - name: Copy PostgreSQL binaries for bundling
+        run: |
+          mkdir -p src-tauri/resources/postgres-macos/bin
+          mkdir -p src-tauri/resources/postgres-macos/lib
+          # Copy only the binaries we need
+          for bin in postgres initdb pg_ctl pg_isready createdb; do
+            cp "$PG_PREFIX/bin/$bin" src-tauri/resources/postgres-macos/bin/
+          done
+          # Copy shared libraries
+          cp -R "$PG_PREFIX/lib/" src-tauri/resources/postgres-macos/lib/
+          echo "Postgres binaries:"
+          ls src-tauri/resources/postgres-macos/bin/
+
+      # ── NestJS → server binary (macOS universal) ──
+      - name: Install root npm deps
+        run: npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build NestJS server
+        run: |
+          cd plaid-server
+          npm install
+          npm run build
+
+      - name: Bundle NestJS into server binary (macOS)
+        run: |
+          npm install -g @yao-pkg/pkg
+          cd plaid-server
+          pkg dist/main.js \
+            --targets node20-macos-x64 \
+            --output ../src-tauri/resources/server
+          chmod +x ../src-tauri/resources/server
+          echo "Server binary: $(ls -lh ../src-tauri/resources/server)"
+
+      # ── Tauri build ───────────────────────────
+      - name: Build Tauri (.dmg)
+        run: npm run tauri build -- --bundles dmg
+
+      - name: Upload macOS .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg

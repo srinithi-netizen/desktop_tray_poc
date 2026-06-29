@@ -1,7 +1,8 @@
 {
   "bundle": {
-    "resources": {
-      "resources/server.exe": "server.exe"
-    }
+    "resources": [
+      "resources/server.exe",
+      "resources/postgres-windows/**/*"
+    ]
   }
 }

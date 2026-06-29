@@ -1,5 +1,17 @@
 <template>
-  <div>
+  <!-- Startup loading screen -->
+  <div v-if="startupError" class="error-screen">
+    <h2>❌ Startup Failed</h2>
+    <p>{{ startupError }}</p>
+  </div>
+
+  <div v-else-if="!ready" class="loading-screen">
+    <div class="spinner"></div>
+    <p>{{ startupMessage }}</p>
+  </div>
+
+  <!-- Your existing app -->
+  <div v-else>
     <ActivationScreen v-if="!isActivated" @activated="onActivated" />
 
     <div v-else class="app-container">
@@ -16,6 +28,7 @@
           :uploads="uploads"
           @upload-deleted="onUploadDeleted"
         />
+        <BankDashboard />
       </main>
     </div>
   </div>
@@ -25,22 +38,40 @@
 import { ref, onMounted } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import ActivationScreen from './components/ActivationScreen.vue'
 import ClientSelector from './components/ClientSelector.vue'
 import FileSelector from './components/FileSelector.vue'
 import UploadHistorySection from './components/UploadHistorySection.vue'
 import NetworkStatus from './components/NetworkStatus.vue'
+import BankDashboard from './components/BankDashboard.vue'
 
+// Startup state
+const ready = ref(false)
+const startupMessage = ref('Starting...')
+const startupError = ref('')
+
+// App state
 const isActivated = ref(!!localStorage.getItem('fluxbooks_session'))
 const uploads = ref([])
 
-// Load all uploads from SQLite on start
 onMounted(async () => {
-  if (isActivated.value) {
-    await loadQueue()
-    // Poll every 3 seconds to refresh progress
-    setInterval(loadQueue, 3000)
-  }
+  // Listen for startup progress from Rust orchestrator
+  await listen('startup_progress', (event) => {
+    startupMessage.value = event.payload.message
+
+    if (event.payload.step === 'ready') {
+      ready.value = true
+      if (isActivated.value) {
+        loadQueue()
+        setInterval(loadQueue, 3000)
+      }
+    }
+
+    if (event.payload.step.startsWith('error')) {
+      startupError.value = event.payload.message
+    }
+  })
 })
 
 async function loadQueue() {
@@ -57,12 +88,10 @@ function onActivated() {
   setInterval(loadQueue, 3000)
 }
 
-// New file queued — reload from SQLite
 async function onUploadQueued() {
   await loadQueue()
 }
 
-// Internet came back — tell Rust to retry all pending/failed
 async function onOnline() {
   try {
     await invoke('retry_pending')
@@ -109,4 +138,20 @@ body { margin: 0; font-family: Arial, sans-serif; background-color: #f4f5f7; }
   background: white; border-radius: 8px;
   padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
+
+/* Startup screens */
+.loading-screen, .error-screen {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100vh; gap: 16px; font-family: sans-serif;
+}
+.spinner {
+  width: 40px; height: 40px;
+  border: 4px solid #e2e8f0;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.error-screen h2 { color: #ef4444; }
 </style>

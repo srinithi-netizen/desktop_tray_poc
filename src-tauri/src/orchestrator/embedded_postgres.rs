@@ -1,35 +1,17 @@
-use std::fs;
+use pg_embed::pg_enums::PgAuthMethod;
+use pg_embed::pg_fetch::{PgFetchSettings, PG_V15};
+use pg_embed::postgres::{PgEmbed, PgSettings};
 use std::path::PathBuf;
-use std::process::{Command, Child, Stdio};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};  // Manager trait needed for .path()
+use std::time::Duration;
+use tauri::{AppHandle, Manager};
 
-static POSTGRES_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+/// Global handle — kept alive for the lifetime of the app.
+static PG: Mutex<Option<PgEmbed>> = Mutex::new(None);
 
-fn postgres_bin_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let resources = app
-        .path()
-        .resource_dir()
-        .map_err(|e| e.to_string())?;
-
-    let folder = if cfg!(target_os = "windows") {
-        "postgres-windows"
-    } else if cfg!(target_os = "macos") {
-        "postgres-macos"
-    } else {
-        "postgres-linux"
-    };
-
-    Ok(resources.join(folder))
-}
-
-fn pg_bin(dir: &PathBuf, name: &str) -> PathBuf {
-    if cfg!(windows) {
-        dir.join("bin").join(format!("{}.exe", name))
-    } else {
-        dir.join("bin").join(name)
-    }
-}
+/// Full DATABASE_URL that the NestJS backend should use.
+pub const DATABASE_URL: &str =
+    "postgresql://fluxbooks:fluxbooks123@127.0.0.1:5432/fluxbooks";
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
@@ -39,115 +21,65 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(base.join("pgdata"))
 }
 
-fn socket_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?;
-    Ok(base.join("pgsocket"))
-}
-
-pub fn ensure_initdb(app: &AppHandle) -> Result<(), String> {
+/// Initialise, start, and create the DB. Idempotent on subsequent launches.
+/// pg_embed downloads the platform binary on the very first call (~20 MB,
+/// cached in the data dir so subsequent launches are instant).
+pub async fn start(app: &AppHandle) -> Result<(), String> {
     let data = data_dir(app)?;
-    let bin = postgres_bin_dir(app)?;
+    std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
 
-    if data.join("PG_VERSION").exists() {
-        println!("[postgres] already initialised");
-        return Ok(());
+    let settings = PgSettings {
+        database_dir: data,
+        port: 5432,
+        user: "fluxbooks".into(),
+        password: "fluxbooks123".into(),
+        auth_method: PgAuthMethod::Plain,
+        persistent: true,          // data survives restarts
+        timeout: Some(Duration::from_secs(30)),
+        migration_dir: None,
+    };
+
+    let fetch = PgFetchSettings {
+        version: PG_V15,
+        ..Default::default()       // auto-selects OS/arch
+    };
+
+    let mut pg = PgEmbed::new(settings, fetch)
+        .await
+        .map_err(|e| format!("pg_embed init failed: {e}"))?;
+
+    pg.setup()
+        .await
+        .map_err(|e| format!("pg_embed setup failed: {e}"))?;
+
+    pg.start_db()
+        .await
+        .map_err(|e| format!("pg_embed start failed: {e}"))?;
+
+    // Create the application database (no-op if it already exists)
+    if !pg
+        .database_exists("fluxbooks")
+        .await
+        .map_err(|e| format!("database_exists check failed: {e}"))?
+    {
+        pg.create_database("fluxbooks")
+            .await
+            .map_err(|e| format!("create_database failed: {e}"))?;
+        println!("[postgres] database 'fluxbooks' created");
+    } else {
+        println!("[postgres] database 'fluxbooks' already exists");
     }
 
-    fs::create_dir_all(&data).map_err(|e| e.to_string())?;
-    println!("[postgres] running initdb at {:?}", data);
-
-    let status = Command::new(pg_bin(&bin, "initdb"))
-        .args([
-            "-D", data.to_str().unwrap(),
-            "--username=fluxbooks",
-            "--auth=trust",
-            "--encoding=UTF8",
-        ])
-        .env("LD_LIBRARY_PATH", bin.join("lib").to_str().unwrap())
-        .status()
-        .map_err(|e| format!("initdb failed: {e}"))?;
-
-    if !status.success() {
-        return Err("initdb exited with non-zero status".into());
-    }
-
-    println!("[postgres] initdb complete");
+    println!("[postgres] ready on port 5432");
+    *PG.lock().unwrap() = Some(pg);
     Ok(())
 }
 
-pub fn start_postgres(app: &AppHandle) -> Result<(), String> {
-    let data = data_dir(app)?;
-    let bin = postgres_bin_dir(app)?;
-    let socket = socket_dir(app)?;
-    fs::create_dir_all(&socket).map_err(|e| e.to_string())?;
-
-    println!("[postgres] starting embedded postgres");
-
-    let child = Command::new(pg_bin(&bin, "postgres"))
-        .args([
-            "-D", data.to_str().unwrap(),
-            "-p", "5432",
-            "-k", socket.to_str().unwrap(),
-            "-h", "127.0.0.1",
-        ])
-        .env("LD_LIBRARY_PATH", bin.join("lib").to_str().unwrap())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn postgres: {e}"))?;
-
-    println!("[postgres] PID {}", child.id());
-    *POSTGRES_PROCESS.lock().unwrap() = Some(child);
-    Ok(())
-}
-
-pub fn ensure_database(app: &AppHandle) -> Result<(), String> {
-    let bin = postgres_bin_dir(app)?;
-    // Ignore error — database may already exist
-    let _ = Command::new(pg_bin(&bin, "createdb"))
-        .args(["-h", "127.0.0.1", "-p", "5432", "-U", "fluxbooks", "fluxbooks"])
-        .env("LD_LIBRARY_PATH", bin.join("lib").to_str().unwrap())
-        .output();
-    Ok(())
-}
-
-pub async fn wait_until_ready(app: &AppHandle, timeout_secs: u64) -> Result<(), String> {
-    let bin = postgres_bin_dir(app)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-
-    while std::time::Instant::now() < deadline {
-        let ok = Command::new(pg_bin(&bin, "pg_isready"))
-            .args(["-h", "127.0.0.1", "-p", "5432", "-U", "fluxbooks"])
-            .env("LD_LIBRARY_PATH", bin.join("lib").to_str().unwrap())
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if ok {
-            println!("[postgres] ready");
-            return Ok(());
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
-
-    Err("PostgreSQL did not become ready in time".into())
-}
-
-pub fn shutdown(app: &AppHandle) {
-    if let (Ok(bin), Ok(data)) = (postgres_bin_dir(app), data_dir(app)) {
-        let _ = Command::new(pg_bin(&bin, "pg_ctl"))
-            .args(["-D", data.to_str().unwrap(), "stop", "-m", "fast"])
-            .env("LD_LIBRARY_PATH", bin.join("lib").to_str().unwrap())
-            .status();
-    }
-    if let Ok(mut guard) = POSTGRES_PROCESS.lock() {
-        if let Some(mut child) = guard.take() {
-            let _ = child.kill();
+pub async fn shutdown() {
+    if let Ok(mut guard) = PG.lock() {
+        if let Some(mut pg) = guard.take() {
+            let _ = pg.stop_db().await;
+            println!("[postgres] shut down");
         }
     }
-    println!("[postgres] shut down");
 }

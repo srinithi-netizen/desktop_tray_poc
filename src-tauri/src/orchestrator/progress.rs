@@ -1,5 +1,5 @@
-use tauri::{AppHandle, Emitter};
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Serialize, Clone)]
 pub struct StartupProgress {
@@ -9,8 +9,11 @@ pub struct StartupProgress {
 
 pub fn emit(app: &AppHandle, step: &str, message: &str) {
     println!("[startup] {}: {}", step, message);
-    let _ = app.emit("startup_progress", StartupProgress {
-        step: step.to_string(),
-        message: message.to_string(),
-    });
+    let _ = app.emit(
+        "startup_progress",
+        StartupProgress {
+            step: step.to_string(),
+            message: message.to_string(),
+        },
+    );
 }

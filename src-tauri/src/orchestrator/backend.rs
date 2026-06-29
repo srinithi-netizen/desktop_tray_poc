@@ -1,7 +1,9 @@
-use std::process::{Command, Child, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};  // Manager trait needed for .path()
+use tauri::{AppHandle, Manager};
 use tokio::time::{sleep, Duration, Instant};
+
+use crate::orchestrator::embedded_postgres::DATABASE_URL;
 
 static BACKEND: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -19,7 +21,7 @@ pub async fn ensure_backend(app: &AppHandle) -> Result<(), String> {
     }
 
     spawn(app)?;
-    wait_until_healthy(15).await
+    wait_until_healthy(30).await
 }
 
 fn spawn(app: &AppHandle) -> Result<(), String> {
@@ -35,12 +37,21 @@ fn spawn(app: &AppHandle) -> Result<(), String> {
 
     println!("[backend] spawning {:?}", server_path);
 
+    // Read Plaid credentials from environment at build time or fall back
+    // to values set in tauri.conf.json → env section.
+    let plaid_client_id = std::env::var("PLAID_CLIENT_ID")
+        .unwrap_or_else(|_| "REPLACE_ME".into());
+    let plaid_secret = std::env::var("PLAID_SECRET")
+        .unwrap_or_else(|_| "REPLACE_ME".into());
+
     let child = Command::new(&server_path)
         .env("PORT", "3001")
-        .env("DATABASE_URL", "postgresql://fluxbooks:fluxbooks123@127.0.0.1:5432/fluxbooks")
+        .env("DATABASE_URL", DATABASE_URL)
         .env("PLAID_ENV", "sandbox")
-        .env("PLAID_CLIENT_ID", "6a3bbeeb89e19d000ef29c83")   // replace with real value
-        .env("PLAID_SECRET", "73cb90f20796c53e1f48280a22c723")          // replace with real value
+        .env("PLAID_CLIENT_ID", plaid_client_id)
+        .env("PLAID_SECRET", plaid_secret)
+        // Instruct NestJS not to do interactive stdin
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -51,8 +62,9 @@ fn spawn(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Hit any lightweight endpoint that confirms NestJS is accepting requests.
 async fn check_health() -> bool {
-    reqwest::get("http://localhost:3001/plaid/link-token")
+    reqwest::get("http://localhost:3001/health")
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
